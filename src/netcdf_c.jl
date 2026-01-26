@@ -613,6 +613,13 @@ end
 function nc_get_att(ncid::Integer,varid::Integer,name)
     xtype,len = nc_inq_att(ncid,varid,name)
 
+    if xtype >= NCDatasets.NC_FIRSTUSERTYPEID
+        name_enum,size,base_nc_type,nfields,class = nc_inq_user_type(ncid,xtype)
+        if class == NC_ENUM
+            xtype = base_nc_type
+        end
+    end
+
     if xtype == NC_CHAR
         val = Vector{UInt8}(undef,len)
         check(ccall((:nc_get_att,libnetcdf),Cint,(Cint,Cint,Cstring,Ptr{Nothing}),ncid,varid,name,val))
@@ -680,13 +687,13 @@ end
 
 
 function nc_insert_enum(ncid::Integer,xtype::Integer,name,value,
-                        T = nc_inq_enum(ncid,typeid)[2])
+                        T = nc_inq_enum(ncid,xtype)[2])
     valuep = Ref{T}(value)
     check(ccall((:nc_insert_enum,libnetcdf),Cint,(Cint,nc_type,Cstring,Ptr{Nothing}),ncid,xtype,name,valuep))
 end
 
 function nc_inq_enum_member(ncid::Integer,xtype::Integer,idx::Integer,
-                            T::Type = nc_inq_enum(ncid,typeid)[2])
+                            T::Type = nc_inq_enum(ncid,xtype)[2])
     valuep = Ref{T}()
     cmember_name = zeros(UInt8,NCDatasets.NC_MAX_NAME+1)
 
@@ -703,6 +710,20 @@ function nc_inq_enum_ident(ncid::Integer,xtype::Integer,value)
     identifier = unsafe_string(pointer(cidentifier))
     return identifier
 end
+
+
+function get_nc_enum_meta(ncid, xtype)
+    name,size,base_nc_type,nfields,class = nc_inq_user_type(ncid, xtype)
+    
+    if class != NC_ENUM
+        throw(ArgumentError("(ncid = $ncid, xtype=$xtype) has class $class"))
+    end
+
+    enum_meta_raw = nc_inq_enum_member.(ncid,xtype,0:(nfields-1))
+    mapping = Dict( elem[2] => elem[1] for elem in enum_meta_raw)
+    return name, mapping
+end
+
 
 # function nc_def_opaque(ncid::Integer,size::Integer,name,xtypep)
 #     check(ccall((:nc_def_opaque,libnetcdf),Cint,(Cint,Cint,Cstring,Ptr{nc_type}),ncid,size,name,xtypep))
@@ -1506,9 +1527,10 @@ function _jltype(ncid,xtype)
     jltype =
         if xtype >= NCDatasets.NC_FIRSTUSERTYPEID
             name,size,base_nc_type,nfields,class = nc_inq_user_type(ncid,xtype)
-            # assume here variable-length type
             if class == NC_VLEN
                 Vector{jlType[base_nc_type]}
+            elseif class == NC_ENUM
+                jlType[base_nc_type]
             else
                 @warn "unsupported type: class=$(class)"
                 Nothing
@@ -1521,7 +1543,7 @@ function _jltype(ncid,xtype)
 end
 
 
-function nc_inq_var(ncid::Integer,varid::Integer)
+function raw_nc_inq_var(ncid::Integer,varid::Integer)
     ndims = nc_inq_varndims(ncid,varid)
 
     ndimsp = Ref(Cint(0))
@@ -1530,14 +1552,18 @@ function nc_inq_var(ncid::Integer,varid::Integer)
     nattsp = Ref(Cint(0))
     xtypep = Ref(nc_type(0))
 
-    check(ccall((:nc_inq_var,libnetcdf),Cint,(Cint,Cint,Ptr{UInt8},Ptr{nc_type},Ptr{Cint},Ptr{Cint},Ptr{Cint}),ncid,varid,cname,xtypep,ndimsp,dimids,nattsp))
+    check(ccall((:nc_inq_var,libnetcdf),Cint,(Cint,Cint,Ptr{UInt8},Ptr{nc_type},Ptr{Cint},Ptr{Cint},Ptr{Cint}),ncid,varid,
+        cname,xtypep,ndimsp,dimids,nattsp))
 
     name = unsafe_string(pointer(cname))
+    return name, xtypep[], ndimsp[], dimids, nattsp[]
+end
 
-    xtype = xtypep[]
+
+function nc_inq_var(ncid::Integer,varid::Integer)
+    name, xtype, ndims, dimids, natts = raw_nc_inq_var(ncid,varid)
     jltype = _jltype(ncid,xtype)
-
-    return name,jltype,dimids,nattsp[]
+    return name,jltype,dimids,natts
 end
 
 function nc_inq_varid(ncid::Integer,name)
@@ -2248,4 +2274,14 @@ function init_certificate_authority()
         @debug "nc_rc_set: set $key to $value"
         nc_rc_set(key,value)
     end
+end
+
+
+function is_var_nc_enum(ncid::Integer,varid::Integer)
+    name, xtype, ndims, dimids, natts = raw_nc_inq_var(ncid,varid)
+    if xtype >= NCDatasets.NC_FIRSTUSERTYPEID
+        name_enum,size,base_nc_type,nfields,class = nc_inq_user_type(ncid,xtype)
+        return class == NC_ENUM
+    end
+    return false
 end

@@ -547,3 +547,10 @@ function _range_indices_dest(of,v,rest...)
 end
 range_indices_dest(ri...) = _range_indices_dest((),ri...)
 
+
+is_var_nc_enum(v::Variable) = is_var_nc_enum(v.ds.ncid,v.varid)
+
+function get_nc_enum_meta(v::Variable)
+    name, xtype, ndims, dimids, natts = raw_nc_inq_var(v.ds.ncid,v.varid)
+    return get_nc_enum_meta(v.ds.ncid, xtype)
+end
